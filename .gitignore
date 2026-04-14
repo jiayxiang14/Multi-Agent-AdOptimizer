@@ -19,21 +19,7 @@ env/
 htmlcov/
 .coverage
 
-# Java
-java/target/
-*.class
-*.jar
-*.war
-*.ear
-.idea/
-*.iml
 
-# Go
-golang/bin/
-golang/vendor/
-*.exe
-*.test
-*.out
 
 # IDE
 .vscode/
