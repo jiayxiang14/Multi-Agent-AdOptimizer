@@ -48,7 +48,7 @@ class OptimizeAgent:
         ]
 
         actions: list[dict] = []
-        messages = list(state.get("agent_messages", []))
+        #messages = list(state.get("agent_messages", []))
 
         pause_actions = self._evaluate_creatives(metrics)
         actions.extend([a.model_dump() for a in pause_actions])
@@ -64,7 +64,10 @@ class OptimizeAgent:
         ab_actions = self._manage_ab_tests(new_creatives, metrics)
         actions.extend([a.model_dump() for a in ab_actions])
 
-        messages.append({
+        if self.ads_client is not None:
+            self._execute_actions(actions, metrics)
+
+        new_message = {
             "agent": self.name,
             "content": (
                 f"优化方案生成完成。共 {len(actions)} 项操作："
@@ -73,7 +76,7 @@ class OptimizeAgent:
                 f"告警处理 {len(actions) - len(pause_actions) - len(budget_actions) - len(ab_actions)} 个，"
                 f"A/B测试 {len(ab_actions)} 个"
             ),
-        })
+        }
 
         iteration = state.get("iteration", 0) + 1
         is_complete = iteration >= state.get("max_iterations", 3) or not alerts
@@ -82,7 +85,7 @@ class OptimizeAgent:
         return {
             "optimization_actions": actions,
             "budget_allocations": [a.model_dump() for a in budget_allocs],
-            "agent_messages": messages,
+            "agent_messages": [new_message],
             "current_agent": "optimize",
             "iteration": iteration,
             "is_complete": is_complete,
@@ -166,6 +169,39 @@ class OptimizeAgent:
                 confidence=0.9,
             ))
         return actions
+
+    def _execute_actions(self, actions: list[dict], metrics: list[CampaignMetrics]) -> None:
+        from ..models.schemas import Platform
+        platform_map: dict = {m.campaign_id: Platform.GOOGLE for m in metrics}
+
+        for action in actions:
+            action_type = action.get("action_type", "")
+            campaign_id = action.get("campaign_id", "")
+            platform = platform_map.get(campaign_id, Platform.GOOGLE)
+
+            try:
+                if action_type == "pause_creative":
+                    self.ads_client.pause_creative(
+                        creative_id=action.get("target_id", campaign_id),
+                        campaign_id=campaign_id,
+                        platform=platform,
+                    )
+                elif action_type == "adjust_budget":
+                    raw = action.get("after_value", "0").replace("¥", "").strip()
+                    try:
+                        new_budget = float(raw)
+                        self.ads_client.update_campaign_budget(
+                            campaign_id=campaign_id,
+                            new_budget=new_budget,
+                            platform=platform,
+                        )
+                    except ValueError:
+                        logger.warning("invalid_budget_value", raw=raw)
+                        continue
+                logger.info("action_executed", action_type=action_type, campaign_id=campaign_id)
+            except Exception as e:
+                logger.error("action_execution_failed", error=str(e),
+                            action_type=action_type, campaign_id=campaign_id)
 
     @staticmethod
     def _extract_campaign_id(message: str) -> str:

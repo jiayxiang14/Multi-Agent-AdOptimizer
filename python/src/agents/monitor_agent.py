@@ -39,19 +39,20 @@ class MonitorAgent:
 
         alerts = detect_anomalies(metrics)
         health_report = self._generate_health_report(metrics)
-        messages = list(state.get("agent_messages", []))
+        #messages = list(state.get("agent_messages", []))
 
         alert_msgs = [a["message"] for a in alerts]
         status = "异常" if alerts else "健康"
-        messages.append({
-            "agent": self.name,
-            "content": (
+        
+        if self.llm is not None:
+            content = self._llm_analyze(metrics,health_report, alerts)
+        else:
+            content = (
                 f"监控报告：系统状态【{status}】。"
                 f"监控 {len(metrics)} 个 Campaign，发现 {len(alerts)} 个异常。"
                 + (f"\n告警详情: {'; '.join(alert_msgs[:3])}" if alerts else "")
-            ),
-        })
-
+            )
+        
         logger.info("monitor_agent_done", alerts=len(alerts))
         return {
             "alerts": [a["message"] for a in alerts],
@@ -97,3 +98,30 @@ class MonitorAgent:
                 "overall_roas": round(overall_roas, 2),
             },
         }
+
+    def _llm_analyze(self, metrics: list, health_report: dict, alerts: list) -> str:
+        summary = health_report.get("summary", {})
+        prompt = (f"请对以下广告投放数据做专业健康分析并给出优先级建议：\n"
+        f"整体指标: CTR={summary.get('overall_ctr', 0):.2%}, "
+        f"CVR={summary.get('overall_cvr', 0):.2%}, "
+        f"ROAS={summary.get('overall_roas', 0):.2f}\n"
+        f"共 {summary.get('total_campaigns', 0)} 个Campaign，告警数量: {len(alerts)}\n"
+        f"告警详情: {'; '.join(a['message'] if isinstance(a, dict) else a for a in alerts[:5])}\n"
+        f"请用2-3句话给出核心问题和最高优先级的改进建议。"
+        )
+
+        try:
+            from langchain_core.messages import HumanMessage, SystemMessage
+            response = self.llm.invoke([
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=prompt),
+        ])
+            return response.content if hasattr(response, "content") else str(response)
+        
+        except Exception as e:
+            logger.warning("llm_monitor_fallback", error=str(e))
+            return (
+            f"监控报告（规则模式）：系统状态【{'异常' if alerts else '健康'}】，"
+            f"健康度 {health_report.get('score', 0):.0f}/100，"
+            f"发现 {len(alerts)} 个告警。"
+            )

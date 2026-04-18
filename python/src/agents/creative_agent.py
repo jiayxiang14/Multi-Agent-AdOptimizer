@@ -38,7 +38,6 @@ EMOTION_MAP = {
 
 
 class CreativeAgent:
-    """创意 Agent：自动生成广告文案变体，支持 LLM 和 Mock 两种模式."""
 
     def __init__(self, llm: Any = None) -> None:
         self.llm = llm
@@ -51,7 +50,8 @@ class CreativeAgent:
         campaign_ids = state.get("campaign_ids", [])
 
         new_creatives: list[dict] = []
-        messages: list[dict] = list(state.get("agent_messages", []))
+        #messages: list[dict] = list(state.get("agent_messages", []))
+        new_messages: list[dict] = []
 
         for m_data in metrics:
             m = CampaignMetrics(**m_data) if isinstance(m_data, dict) else m_data
@@ -61,7 +61,7 @@ class CreativeAgent:
             variants = self._generate_variants(m)
             new_creatives.extend([v.model_dump() for v in variants])
 
-            messages.append({
+            new_messages.append({
                 "agent": self.name,
                 "content": (
                     f"为 Campaign {m.campaign_id} 生成了 {len(variants)} 个新创意变体。"
@@ -73,7 +73,7 @@ class CreativeAgent:
         logger.info("creative_agent_done", variants_count=len(new_creatives))
         return {
             "new_creatives": new_creatives,
-            "agent_messages": messages,
+            "agent_messages": new_messages,
             "current_agent": "creative",
         }
 

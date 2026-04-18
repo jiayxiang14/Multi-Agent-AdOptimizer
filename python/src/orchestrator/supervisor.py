@@ -15,8 +15,9 @@ LangGraph Supervisor — 广告优化闭环的核心编排层。
 from __future__ import annotations
 
 import json
+import operator
 import os
-from typing import Any
+from typing import Annotated, Any, TypedDict
 
 import structlog
 
@@ -39,38 +40,33 @@ except ImportError:
 
 
 # ────────── State Schema ──────────
+# Annotated[list, operator.add] 告诉 LangGraph：当多个节点都写这个字段时，
+# 用 operator.add（即列表拼接）合并，而不是后者覆盖前者。
+# 这解决了多轮迭代和并行节点下 agent_messages / optimization_actions 被覆盖的问题。
 
-STATE_SCHEMA = {
-    "task": str,
-    "campaign_ids": list,
-    "metrics": list,
-    "new_creatives": list,
-    "audience_insights": dict,
-    "bidding_decisions": list,
-    "optimization_actions": list,
-    "budget_allocations": list,
-    "alerts": list,
-    "agent_messages": list,
-    "current_agent": str,
-    "iteration": int,
-    "max_iterations": int,
-    "is_complete": bool,
-}
+def _take_last(a: Any, b: Any) -> Any:
+    """并行节点同时写同一字段时，取最后写入的值（即 b）."""
+    return b
 
 
-def _merge_lists(old: list, new: list) -> list:
-    """状态合并策略：列表追加而非覆盖."""
-    if new is None:
-        return old
-    return new
-
-
-def _merge_dicts(old: dict, new: dict) -> dict:
-    if new is None:
-        return old
-    merged = dict(old) if old else {}
-    merged.update(new)
-    return merged
+class AdOptimizerStateDict(TypedDict, total=False):
+    task: str
+    campaign_ids: list
+    metrics: list
+    new_creatives: list
+    audience_insights: dict
+    bidding_decisions: list
+    # 跨迭代累积：每轮新增的操作都保留，不覆盖
+    optimization_actions: Annotated[list, operator.add]
+    budget_allocations: list
+    alerts: list
+    # 跨迭代累积：每个 Agent 的每条消息都保留，形成完整执行日志
+    agent_messages: Annotated[list, operator.add]
+    # 并行节点（audience / creative）同时写 current_agent 时取最后一个
+    current_agent: Annotated[str, _take_last]
+    iteration: int
+    max_iterations: int
+    is_complete: bool
 
 
 # ────────── Supervisor 构建 ──────────
@@ -87,8 +83,14 @@ class AdOptimizerSupervisor:
         self.graph = self._build_graph() if HAS_LANGGRAPH else None
 
     def _build_graph(self) -> Any:
-        """构建 LangGraph 状态图."""
-        graph = StateGraph(dict)
+        """构建 LangGraph 状态图.
+
+        拓扑结构（audience 和 creative 并行）：
+          monitor → audience ──┐
+                  └→ creative ─┴→ bidding → optimize → (条件边)
+        """
+        # 使用 TypedDict 而非 dict，LangGraph 才能识别 Annotated reducer
+        graph = StateGraph(AdOptimizerStateDict)
 
         graph.add_node("monitor", self.monitor.run)
         graph.add_node("audience", self.audience.run)
@@ -97,11 +99,18 @@ class AdOptimizerSupervisor:
         graph.add_node("optimize", self.optimize.run)
 
         graph.set_entry_point("monitor")
+
+        # monitor 完成后，audience 和 creative 并行启动（fan-out）
         graph.add_edge("monitor", "audience")
-        graph.add_edge("audience", "creative")
+        graph.add_edge("monitor", "creative")
+
+        # audience 和 creative 都完成后 bidding 才启动（fan-in）
+        graph.add_edge("audience", "bidding")
         graph.add_edge("creative", "bidding")
+
         graph.add_edge("bidding", "optimize")
 
+        # 条件边：是否继续迭代
         graph.add_conditional_edges(
             "optimize",
             self._should_continue,
@@ -115,7 +124,7 @@ class AdOptimizerSupervisor:
         """条件分支：是否继续迭代优化."""
         if state.get("is_complete", False):
             return "end"
-        iteration = state.get("iteration", 0)
+        iteration = state.get("iteration", 0) #从 state 这个字典里取 "iteration" 这个键的值如果没有这个键，就用默认值 0
         max_iter = state.get("max_iterations", 3)
         if iteration >= max_iter:
             return "end"
@@ -159,16 +168,36 @@ class AdOptimizerSupervisor:
 
         return result
 
+    @staticmethod
+    def _merge_state(old: dict, updates: dict) -> dict:
+        """智能合并 state：列表字段追加，字典字段合并，标量字段覆盖.
+
+        与 LangGraph 的 Annotated reducer 保持相同语义，
+        让串行回退路径和 LangGraph 路径的行为一致。
+        """
+        # 这两个字段要跨次调用累积，其余列表字段取最新值
+        APPEND_KEYS = {"agent_messages", "optimization_actions"}
+        result = dict(old)
+        for key, value in updates.items():
+            if key in APPEND_KEYS and isinstance(value, list):
+                result[key] = result.get(key, []) + value
+            elif key == "audience_insights" and isinstance(value, dict):
+                result[key] = {**result.get(key, {}), **value}
+            else:
+                result[key] = value
+        return result
+
     def _run_sequential(self, state: dict) -> dict:
         """无 LangGraph 时的顺序执行回退方案."""
         for iteration in range(state.get("max_iterations", 3)):
             logger.info("sequential_iteration", iteration=iteration + 1)
 
-            state = {**state, **self.monitor.run(state)}
-            state = {**state, **self.audience.run(state)}
-            state = {**state, **self.creative.run(state)}
-            state = {**state, **self.bidding.run(state)}
-            state = {**state, **self.optimize.run(state)}
+            state = self._merge_state(state, self.monitor.run(state))
+            # audience 和 creative 串行模拟并行（结果都 merge 进 state）
+            state = self._merge_state(state, self.audience.run(state))
+            state = self._merge_state(state, self.creative.run(state))
+            state = self._merge_state(state, self.bidding.run(state))
+            state = self._merge_state(state, self.optimize.run(state))
 
             if state.get("is_complete", False):
                 break

@@ -6,6 +6,7 @@ Streamlit 监控仪表板 — 广告投放效果实时可视化。
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -28,6 +29,31 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+def _check_auth() -> None:
+    """简单密码保护。在 .env 里设置 DASHBOARD_PASSWORD=xxx 即可启用。
+    不设置则默认开放访问（本地开发时方便）。
+    """
+    password = os.getenv("DASHBOARD_PASSWORD", "")
+    if not password:
+        return  # 未配置密码，直接放行
+
+    if st.session_state.get("authenticated"):
+        return
+
+    st.title("Ad Optimizer Dashboard")
+    pwd = st.text_input("请输入访问密码", type="password", key="pwd_input")
+    if st.button("登录"):
+        if pwd == password:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("密码错误，请重试")
+    st.stop()  # 未通过验证时阻止后续渲染
+
+
+_check_auth()
 
 st.markdown("""
 <style>

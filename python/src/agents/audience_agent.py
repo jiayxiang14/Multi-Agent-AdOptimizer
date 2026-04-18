@@ -34,21 +34,21 @@ class AudienceAgent:
         campaign_ids = state.get("campaign_ids", [])
 
         insights = self._analyze_audience(metrics, campaign_ids)
-        messages = list(state.get("agent_messages", []))
+        #messages = list(state.get("agent_messages", []))
 
         top_segments = insights.get("top_segments", [])
-        messages.append({
+        new_message = {
             "agent": self.name,
             "content": (
                 f"受众分析完成。识别出 {len(top_segments)} 个高价值人群段。"
                 f"推荐优先定向: {', '.join(s.get('name', '') for s in top_segments[:3])}"
             ),
-        })
+        }
 
         logger.info("audience_agent_done", segments=len(top_segments))
         return {
             "audience_insights": insights,
-            "agent_messages": messages,
+            "agent_messages": [new_message],
             "current_agent": "audience",
         }
 
@@ -58,12 +58,56 @@ class AudienceAgent:
             return self._db_analyze(campaign_ids)
         return self._mock_analyze(metrics)
 
-    def _db_analyze(self, campaign_ids: list[str]) -> dict:
-        """从 ClickHouse 读取真实受众数据."""
-        breakdowns = {}
-        for cid in campaign_ids:
-            breakdowns[cid] = self.db.get_audience_breakdown(cid)
-        return {"breakdowns": breakdowns, "top_segments": [], "lookalike_suggestions": []}
+def _db_analyze(self, campaign_ids: list[str]) -> dict:
+    breakdowns = {}
+    top_segments = []
+
+    for cid in campaign_ids:
+        breakdown = self.db.get_audience_breakdown(cid)
+        breakdowns[cid] = breakdown
+
+        for row in breakdown.get("by_age", []):
+            age = row.get("age_group", "unknown")
+            clicks = row.get("clicks", 0)
+            conversions = row.get("conversions", 0)
+            cnt = row.get("cnt", 1) or 1
+
+            ctr = clicks / cnt
+            cvr = conversions / clicks if clicks > 0 else 0
+            score = round(min(ctr / 0.05, 1.0) * 50 + min(cvr / 0.1, 1.0) * 50, 1)
+
+            if ctr > 0.01 or cvr > 0.03:
+                top_segments.append({
+                    "name": f"{age}岁 ({cid})",
+                    "age_range": age,
+                    "gender": "all",
+                    "interests": [],
+                    "estimated_ctr": round(ctr, 4),
+                    "estimated_cvr": round(cvr, 4),
+                    "score": score,
+                    "recommendation": (
+                        "高价值核心人群，建议加大预算" if score > 70
+                        else "潜力人群，可适量投放测试"
+                    ),
+                })
+
+    top_segments.sort(key=lambda x: x["score"], reverse=True)
+
+    lookalike = [
+        {
+            "seed_segment": seg["name"],
+            "expansion": "相似人群扩展 1%",
+            "estimated_reach": 500000,
+            "expected_ctr_change": "+10%",
+        }
+        for seg in top_segments[:2]
+    ]
+
+    return {
+        "breakdowns": breakdowns,
+        "top_segments": top_segments[:6],
+        "lookalike_suggestions": lookalike,
+    }
 
     def _mock_analyze(self, metrics: list) -> dict:
         """Mock 模式：生成模拟受众洞察."""

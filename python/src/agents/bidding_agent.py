@@ -35,7 +35,7 @@ class BiddingAgent:
         audience = state.get("audience_insights", {})
 
         decisions: list[dict] = []
-        messages = list(state.get("agent_messages", []))
+        #messages = list(state.get("agent_messages", []))
 
         for m_data in metrics:
             m = CampaignMetrics(**m_data) if isinstance(m_data, dict) else m_data
@@ -43,28 +43,28 @@ class BiddingAgent:
             decisions.append(decision.model_dump())
 
         avg_bid = sum(d["recommended_bid"] for d in decisions) / len(decisions) if decisions else 0
-        messages.append({
+        new_message = {
             "agent": self.name,
             "content": (
                 f"竞价策略更新完成。优化了 {len(decisions)} 个 Campaign 的出价。"
                 f"平均推荐出价: ¥{avg_bid:.2f}, 目标 ROAS: {self.target_roas}"
             ),
-        })
+        }
 
         logger.info("bidding_agent_done", decisions_count=len(decisions))
         return {
             "bidding_decisions": decisions,
-            "agent_messages": messages,
+            "agent_messages": [new_message],
             "current_agent": "bidding",
         }
 
     def _compute_bid(self, metrics: CampaignMetrics, audience: dict) -> BiddingDecision:
         """计算单个 Campaign 的竞价决策."""
-        pred_ctr = self._predict_ctr(metrics)
-        pred_cvr = self._predict_cvr(metrics)
+        pred_ctr = self._predict_ctr(metrics)# click-through rate 预估
+        pred_cvr = self._predict_cvr(metrics)# conversion rate 预估
 
-        target_cpa = metrics.cpa if metrics.cpa < float("inf") else 100.0
-        ecpm = calculate_ecpm(pred_ctr, pred_cvr, target_cpa)
+        target_cpa = metrics.cpa if metrics.cpa < float("inf") else 100.0 # 目标每次转化成本，默认为100元
+        ecpm = calculate_ecpm(pred_ctr, pred_cvr, target_cpa)# 预估每千次展示的收益（eCPM）= CTR * CVR * 目标 CPA * 1000
 
         multiplier = self._calculate_multiplier(metrics)
         recommended_bid = round(ecpm / 1000 * multiplier, 2)
